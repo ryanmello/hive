@@ -1,10 +1,14 @@
-Hive
-Your finances, working in harmony.
-Inspired by the collective intelligence of the colony — where every transaction finds its place.
+# 🐝 Hive
 
-## 🐝 What is Hive?
+### Your finances, working in harmony.
 
-**Hive** is a personal finance application that brings order to your financial life. Like bees organizing their colony with remarkable precision, Hive uses AI to automatically categorize your spending, surface insights, and help you understand where your money goes.
+*Inspired by the collective intelligence of the colony — where every transaction finds its place.*
+
+---
+
+## What is Hive?
+
+**Hive** is a personal finance application that brings order to your financial life. Hive uses AI to automatically categorize your spending, surface insights, and help you understand where your money goes.
 
 Connect your bank accounts, and let Hive's intelligence do the rest.
 
