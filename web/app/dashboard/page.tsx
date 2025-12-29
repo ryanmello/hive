@@ -5,11 +5,14 @@ import { Hexagon } from "lucide-react";
 import { HexagonGrid } from "@/components/hive/hexagon-grid";
 import { CategoryDetail } from "@/components/hive/category-detail";
 import { SpendingSummary } from "@/components/hive/spending-summary";
+import { ChatSidebar } from "@/components/hive/chat-sidebar";
 import { mockMonthlySpending, type SpendingCategory } from "@/data/mock-data";
+import { cn } from "@/lib/utils";
 
 export default function Dashboard() {
   const [selectedCategory, setSelectedCategory] =
     React.useState<SpendingCategory | null>(null);
+  const [chatOpen, setChatOpen] = React.useState(true);
 
   return (
     <div className="relative min-h-screen overflow-hidden">
@@ -59,7 +62,10 @@ export default function Dashboard() {
         />
         {/* Bottom right glow */}
         <div
-          className="absolute -bottom-40 -right-40 h-96 w-96 rounded-full opacity-15 blur-3xl"
+          className={cn(
+            "absolute -bottom-40 h-96 w-96 rounded-full opacity-15 blur-3xl transition-all duration-300",
+            chatOpen ? "-right-40" : "-right-40"
+          )}
           style={{
             background:
               "radial-gradient(circle, rgba(139, 92, 246, 0.3) 0%, transparent 70%)",
@@ -67,7 +73,11 @@ export default function Dashboard() {
         />
         {/* Center subtle glow */}
         <div
-          className="absolute left-1/2 top-1/2 h-[600px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full opacity-10 blur-3xl"
+          className={cn(
+            "absolute top-1/2 h-[600px] w-[600px] -translate-y-1/2 rounded-full opacity-10 blur-3xl transition-all duration-300",
+            chatOpen ? "left-[calc(50%-190px)]" : "left-1/2",
+            chatOpen ? "-translate-x-1/2" : "-translate-x-1/2"
+          )}
           style={{
             background:
               "radial-gradient(circle, rgba(251, 191, 36, 0.5) 0%, transparent 60%)",
@@ -75,17 +85,24 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Main content */}
-      <div className="relative z-10 mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        {/* Spending summary header */}
-        <SpendingSummary data={mockMonthlySpending} />
+      {/* Main content - adjusts when chat sidebar is open */}
+      <div
+        className={cn(
+          "relative z-10 transition-all duration-300 ease-out",
+          chatOpen ? "pr-[380px]" : "pr-0"
+        )}
+      >
+        <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+          {/* Spending summary header */}
+          <SpendingSummary data={mockMonthlySpending} />
 
-        {/* Hexagon grid */}
-        <HexagonGrid
-          categories={mockMonthlySpending.categories}
-          selectedCategory={selectedCategory}
-          onSelectCategory={setSelectedCategory}
-        />
+          {/* Hexagon grid */}
+          <HexagonGrid
+            categories={mockMonthlySpending.categories}
+            selectedCategory={selectedCategory}
+            onSelectCategory={setSelectedCategory}
+          />
+        </div>
       </div>
 
       {/* Category detail panel */}
@@ -96,7 +113,12 @@ export default function Dashboard() {
       />
 
       {/* Decorative floating hexagons (subtle) */}
-      <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+      <div
+        className={cn(
+          "pointer-events-none fixed inset-0 z-0 overflow-hidden transition-all duration-300",
+          chatOpen ? "right-[380px]" : "right-0"
+        )}
+      >
         {[...Array(6)].map((_, i) => (
           <div
             key={i}
@@ -115,6 +137,9 @@ export default function Dashboard() {
           </div>
         ))}
       </div>
+
+      {/* AI Chat Sidebar */}
+      <ChatSidebar open={chatOpen} onOpenChange={setChatOpen} />
     </div>
   );
 }

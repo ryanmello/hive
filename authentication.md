@@ -1,685 +1,688 @@
-# Hive - Authentication System
+# Hive - Authentication Plan
 
-> Detailed documentation for the self-managed JWT authentication system across all services.
+> Supabase-powered authentication and database integration for secure communication with Go and Python backends.
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Authentication Flow](#2-authentication-flow)
-3. [Token Strategy](#3-token-strategy)
-4. [Registration](#4-registration)
-5. [Login](#5-login)
-6. [Token Refresh](#6-token-refresh)
-7. [Request Authentication](#7-request-authentication)
-8. [Cross-Service Authentication](#8-cross-service-authentication)
-9. [WebSocket Authentication](#9-websocket-authentication)
-10. [Password Security](#10-password-security)
-11. [Security Considerations](#11-security-considerations)
-12. [Implementation Details](#12-implementation-details)
+2. [Why Supabase](#2-why-supabase)
+3. [Architecture Changes](#3-architecture-changes)
+4. [Authentication Flow](#4-authentication-flow)
+5. [Frontend Integration](#5-frontend-integration)
+6. [Backend JWT Validation](#6-backend-jwt-validation)
+7. [Database Integration](#7-database-integration)
+8. [Security Considerations](#8-security-considerations)
+9. [Implementation Checklist](#9-implementation-checklist)
 
 ---
 
 ## 1. Overview
 
-### 1.1 Authentication Architecture
+### 1.1 Authentication Strategy
+
+Hive uses **Supabase** as the unified provider for:
+- **Authentication** — User sign-up, login, session management, and JWT issuance
+- **Database** — PostgreSQL database hosted and managed by Supabase
+- **Row Level Security (RLS)** — Database-level access control tied to authenticated users
+
+### 1.2 Token Flow Summary
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              FRONTEND (Next.js)                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         Auth Context                                 │    │
-│  │  • Stores access token in memory (React state)                       │    │
-│  │  • Refresh token stored in HttpOnly cookie (set by API)              │    │
-│  │  • Attaches Authorization header to all API requests                 │    │
-│  │  • Handles token refresh on 401 responses                            │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────┬──────────────────────────────────────────┘
-                                   │
-                    Authorization: Bearer <access_token>
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              GO API GATEWAY                                  │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         Auth Middleware                              │    │
-│  │  • Validates JWT signature (HS256)                                   │    │
-│  │  • Checks token expiration                                           │    │
-│  │  • Extracts user_id from claims                                      │    │
-│  │  • Attaches user context to request                                  │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         Auth Service                                 │    │
-│  │  • Generates JWT tokens (access + refresh)                           │    │
-│  │  • Validates refresh tokens                                          │    │
-│  │  • Manages token blacklist (logout)                                  │    │
-│  │  • Hashes/verifies passwords (bcrypt)                                │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────┬──────────────────────────────────────────┘
-                                   │
-                    gRPC metadata: user_id, validated by API
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           PYTHON AI SERVICE                                  │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                      Request Context                                 │    │
-│  │  • Receives user_id from gRPC metadata                               │    │
-│  │  • Trusts Go API (internal network only)                             │    │
-│  │  • Uses user_id for personalization                                  │    │
-│  │  • NO direct JWT validation (delegated to Go API)                    │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 1.2 Key Principles
-
-| Principle | Implementation |
-|-----------|----------------|
-| **Stateless API** | JWT contains all needed user info, no server-side session lookup |
-| **Short-lived Access** | Access tokens expire in 15 minutes |
-| **Secure Refresh** | Refresh tokens in HttpOnly cookies, 7-day lifetime |
-| **Defense in Depth** | Multiple validation layers, secure defaults |
-| **Service Trust** | Python AI trusts Go API; no token passing between internal services |
-
----
-
-## 2. Authentication Flow
-
-### 2.1 Complete Auth Lifecycle
-
-```
-┌──────────┐          ┌──────────┐          ┌──────────┐          ┌──────────┐
-│  User    │          │ Frontend │          │  Go API  │          │ Database │
-└────┬─────┘          └────┬─────┘          └────┬─────┘          └────┬─────┘
-     │                     │                     │                     │
-     │  1. Fill signup form│                     │                     │
-     │────────────────────▶│                     │                     │
-     │                     │                     │                     │
-     │                     │  2. POST /auth/register                   │
-     │                     │  { email, password }│                     │
-     │                     │────────────────────▶│                     │
-     │                     │                     │                     │
-     │                     │                     │  3. Check email unique
-     │                     │                     │────────────────────▶│
-     │                     │                     │◀────────────────────│
-     │                     │                     │                     │
-     │                     │                     │  4. Hash password   │
-     │                     │                     │  (bcrypt, cost 12)  │
-     │                     │                     │                     │
-     │                     │                     │  5. Insert user     │
-     │                     │                     │────────────────────▶│
-     │                     │                     │◀────────────────────│
-     │                     │                     │                     │
-     │                     │                     │  6. Generate tokens │
-     │                     │                     │  - Access (15min)   │
-     │                     │                     │  - Refresh (7days)  │
-     │                     │                     │                     │
-     │                     │                     │  7. Store refresh   │
-     │                     │                     │  token hash         │
-     │                     │                     │────────────────────▶│
-     │                     │                     │                     │
-     │                     │  8. Response:       │                     │
-     │                     │  { access_token, user }                   │
-     │                     │  Set-Cookie: refresh_token (HttpOnly)     │
-     │                     │◀────────────────────│                     │
-     │                     │                     │                     │
-     │                     │  9. Store access    │                     │
-     │                     │  token in memory    │                     │
-     │                     │                     │                     │
-     │  10. Redirect to    │                     │                     │
-     │  dashboard          │                     │                     │
-     │◀────────────────────│                     │                     │
-     │                     │                     │                     │
-     │  11. View dashboard │                     │                     │
-     │────────────────────▶│                     │                     │
-     │                     │                     │                     │
-     │                     │  12. GET /transactions                    │
-     │                     │  Authorization: Bearer <access_token>     │
-     │                     │────────────────────▶│                     │
-     │                     │                     │                     │
-     │                     │                     │  13. Validate JWT   │
-     │                     │                     │  Extract user_id    │
-     │                     │                     │                     │
-     │                     │                     │  14. Query user's   │
-     │                     │                     │  transactions       │
-     │                     │                     │────────────────────▶│
-     │                     │                     │◀────────────────────│
-     │                     │                     │                     │
-     │                     │  15. { transactions }                     │
-     │                     │◀────────────────────│                     │
-     │                     │                     │                     │
-     │  16. Display data   │                     │                     │
-     │◀────────────────────│                     │                     │
+┌──────────┐         ┌──────────┐         ┌──────────┐         ┌──────────┐
+│ Frontend │         │ Supabase │         │  Go API  │         │Python AI │
+│ (Next.js)│         │   Auth   │         │ Gateway  │         │ Service  │
+└────┬─────┘         └────┬─────┘         └────┬─────┘         └────┬─────┘
+     │                    │                    │                    │
+     │  1. Login/Signup   │                    │                    │
+     │───────────────────▶│                    │                    │
+     │                    │                    │                    │
+     │  2. JWT (access +  │                    │                    │
+     │     refresh token) │                    │                    │
+     │◀───────────────────│                    │                    │
+     │                    │                    │                    │
+     │  3. API Request    │                    │                    │
+     │  Authorization:    │                    │                    │
+     │  Bearer <jwt>      │                    │                    │
+     │─────────────────────────────────────────▶                    │
+     │                    │                    │                    │
+     │                    │  4. Verify JWT     │                    │
+     │                    │  (using Supabase   │                    │
+     │                    │   JWT secret)      │                    │
+     │                    │                    │                    │
+     │                    │                    │  5. gRPC call      │
+     │                    │                    │  (user context)    │
+     │                    │                    │───────────────────▶│
+     │                    │                    │                    │
+     │  6. Response       │                    │                    │
+     │◀─────────────────────────────────────────────────────────────│
 ```
 
 ---
 
-## 3. Token Strategy
+## 2. Why Supabase
 
-### 3.1 Dual Token System
+### 2.1 Benefits Over Self-Managed Auth
 
-We use two types of tokens for security:
+| Aspect | Self-Managed | Supabase |
+|--------|--------------|----------|
+| **Implementation Time** | 1-2 weeks | 1-2 days |
+| **Password Security** | Must implement bcrypt, handle edge cases | Handled automatically |
+| **Token Management** | Build refresh logic, storage, rotation | Built-in with auto-refresh |
+| **OAuth Providers** | Implement each provider manually | One-click Google, GitHub, etc. |
+| **Email Verification** | Set up email service, templates | Built-in with customizable templates |
+| **Password Reset** | Build flow, secure tokens | Built-in flow |
+| **Database + Auth** | Separate systems to sync | Unified with RLS integration |
+| **Security Updates** | Must monitor and patch | Managed by Supabase |
 
-| Token | Purpose | Lifetime | Storage | Sent Via |
-|-------|---------|----------|---------|----------|
-| **Access Token** | Authenticate API requests | 15 minutes | Memory (JS variable) | `Authorization` header |
-| **Refresh Token** | Obtain new access tokens | 7 days | HttpOnly Cookie | Automatic with requests |
+### 2.2 Supabase JWT Structure
 
-### 3.2 Why This Approach?
-
-**Access Token in Memory:**
-- Cannot be stolen via XSS (not in localStorage/cookies accessible to JS)
-- Short lifetime limits damage if somehow leaked
-- Lost on page refresh (but that's okay, we refresh it)
-
-**Refresh Token in HttpOnly Cookie:**
-- Cannot be accessed by JavaScript (XSS protection)
-- Automatically sent with requests to same origin
-- Longer lifetime for user convenience
-- Can be revoked server-side
-
-### 3.3 JWT Structure
-
-**Access Token:**
-```json
-{
-  "header": {
-    "alg": "HS256",
-    "typ": "JWT"
-  },
-  "payload": {
-    "sub": "550e8400-e29b-41d4-a716-446655440000",
-    "email": "user@example.com",
-    "type": "access",
-    "iat": 1703644800,
-    "exp": 1703645700
-  },
-  "signature": "..."
-}
-```
-
-**Refresh Token:**
-```json
-{
-  "header": {
-    "alg": "HS256",
-    "typ": "JWT"
-  },
-  "payload": {
-    "sub": "550e8400-e29b-41d4-a716-446655440000",
-    "type": "refresh",
-    "jti": "unique-token-id-for-revocation",
-    "iat": 1703644800,
-    "exp": 1704249600
-  },
-  "signature": "..."
-}
-```
-
-### 3.4 Token Claims
-
-| Claim | Description | Example |
-|-------|-------------|---------|
-| `sub` | User ID (UUID) | `550e8400-e29b-41d4-a716-446655440000` |
-| `email` | User's email (access token only) | `user@example.com` |
-| `type` | Token type | `access` or `refresh` |
-| `jti` | Token ID for revocation (refresh only) | `abc123` |
-| `iat` | Issued at timestamp | `1703644800` |
-| `exp` | Expiration timestamp | `1703645700` |
-
----
-
-## 4. Registration
-
-### 4.1 Endpoint
-
-```
-POST /api/v1/auth/register
-```
-
-### 4.2 Request
+Supabase issues JWTs with the following claims:
 
 ```json
 {
+  "aud": "authenticated",
+  "exp": 1703731200,
+  "iat": 1703644800,
+  "iss": "https://<project-ref>.supabase.co/auth/v1",
+  "sub": "user-uuid-here",
   "email": "user@example.com",
-  "password": "SecureP@ssw0rd!"
-}
-```
-
-### 4.3 Validation Rules
-
-| Field | Rules |
-|-------|-------|
-| `email` | Required, valid email format, unique in database |
-| `password` | Required, minimum 8 characters, at least 1 uppercase, 1 lowercase, 1 number |
-
-### 4.4 Success Response (201 Created)
-
-```json
-{
-  "user": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "email": "user@example.com",
-    "created_at": "2024-12-27T10:00:00Z"
+  "phone": "",
+  "app_metadata": {
+    "provider": "email",
+    "providers": ["email"]
   },
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  "user_metadata": {
+    "name": "John Doe"
+  },
+  "role": "authenticated",
+  "aal": "aal1",
+  "amr": [{"method": "password", "timestamp": 1703644800}],
+  "session_id": "session-uuid-here"
 }
 ```
 
-**Response Headers:**
-```
-Set-Cookie: refresh_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...; 
-            HttpOnly; 
-            Secure; 
-            SameSite=Strict; 
-            Path=/api/v1/auth; 
-            Max-Age=604800
-```
+**Key Claims for Backend Validation:**
+- `sub` — User's unique ID (UUID)
+- `email` — User's email address
+- `exp` — Token expiration timestamp
+- `role` — Should be "authenticated" for logged-in users
 
-### 4.5 Error Responses
+---
 
-**Email Already Exists (409 Conflict):**
-```json
-{
-  "error": {
-    "code": "EMAIL_EXISTS",
-    "message": "An account with this email already exists"
-  }
-}
-```
+## 3. Architecture Changes
 
-**Validation Error (400 Bad Request):**
-```json
-{
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "Invalid input",
-    "details": {
-      "password": "Password must be at least 8 characters"
-    }
-  }
-}
-```
-
-### 4.6 Registration Flow Diagram
+### 3.1 Updated Service Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      POST /api/v1/auth/register                      │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │
-                                ▼
-                    ┌───────────────────────┐
-                    │   Validate Input      │
-                    │   - Email format      │
-                    │   - Password strength │
-                    └───────────┬───────────┘
-                                │
-                    ┌───────────▼───────────┐
-                    │   Check Email Unique  │
-                    └───────────┬───────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │ Exists          │                 │ Not Exists
-              ▼                 │                 ▼
-    ┌─────────────────┐         │       ┌─────────────────┐
-    │ Return 409      │         │       │ Hash Password   │
-    │ EMAIL_EXISTS    │         │       │ (bcrypt cost 12)│
-    └─────────────────┘         │       └────────┬────────┘
-                                │                │
-                                │       ┌────────▼────────┐
-                                │       │ Insert User     │
-                                │       │ into Database   │
-                                │       └────────┬────────┘
-                                │                │
-                                │       ┌────────▼────────┐
-                                │       │ Generate Tokens │
-                                │       │ Access + Refresh│
-                                │       └────────┬────────┘
-                                │                │
-                                │       ┌────────▼────────┐
-                                │       │ Store Refresh   │
-                                │       │ Token Hash in DB│
-                                │       └────────┬────────┘
-                                │                │
-                                │       ┌────────▼────────┐
-                                │       │ Return 201      │
-                                │       │ + Set Cookie    │
-                                │       └─────────────────┘
+                                    ┌─────────────────────────────────────┐
+                                    │            FRONTEND                  │
+                                    │  ┌───────────────────────────────┐  │
+                                    │  │      Next.js (TypeScript)     │  │
+                                    │  │                               │  │
+                                    │  │  • Supabase Auth Client       │  │
+                                    │  │  • Protected Routes           │  │
+                                    │  │  • JWT Auto-Refresh           │  │
+                                    │  └───────────────────────────────┘  │
+                                    └──────────────┬──────────────────────┘
+                                                   │
+                                    ┌──────────────┴──────────────┐
+                                    │  REST/HTTP      WebSocket   │
+                                    │  Bearer: JWT    ?token=JWT  │
+                                    ▼                             ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              GO API GATEWAY                                   │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                            Gin Framework                                │  │
+│  │                                                                         │  │
+│  │  ┌──────────────────────────────────────────────────────────────────┐  │  │
+│  │  │                    Supabase JWT Middleware                        │  │  │
+│  │  │  • Verify JWT signature using Supabase JWT secret                │  │  │
+│  │  │  • Extract user_id (sub claim) and email                         │  │  │
+│  │  │  • Attach user context to request                                │  │  │
+│  │  └──────────────────────────────────────────────────────────────────┘  │  │
+│  │                                                                         │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  │  │
+│  │  │    Plaid     │  │ Transactions │  │   Spending   │  │  WebSocket │  │  │
+│  │  │   Handler    │  │   Handler    │  │   Handler    │  │   Handler  │  │  │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘  └────────────┘  │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+└───────────┬───────────────────┬───────────────────┬──────────────────────────┘
+            │                   │                   │
+            │ SQL               │ gRPC              │ HTTPS
+            ▼                   ▼                   ▼
+    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+    │   Supabase   │    │  Python AI   │    │  Plaid API   │
+    │   Database   │    │   Service    │    │              │
+    │              │    │              │    │  • Link      │
+    │  • Users*    │    │  • Categorize│    │  • Accounts  │
+    │  • Accounts  │    │  • Chat Agent│    │  • Txns      │
+    │  • Txns      │    │  • OpenAI    │    │              │
+    │  • Chat Logs │    │              │    │              │
+    │              │    │              │    │              │
+    └──────────────┘    └──────────────┘    └──────────────┘
+
+* Users table managed by Supabase Auth (auth.users)
+```
+
+### 3.2 What Changes From Original Architecture
+
+| Component | Original Plan | With Supabase |
+|-----------|---------------|---------------|
+| **User Registration** | Go API with bcrypt | Supabase Auth |
+| **Login** | Go API generates JWT | Supabase Auth returns JWT |
+| **JWT Generation** | Go API | Supabase Auth |
+| **JWT Validation** | Go API (self-signed) | Go API (verify with Supabase secret) |
+| **Refresh Tokens** | Go API + Redis | Supabase (automatic) |
+| **Password Reset** | Go API + email service | Supabase (built-in) |
+| **Database** | Self-hosted PostgreSQL | Supabase PostgreSQL |
+| **Users Table** | Custom `users` table | `auth.users` (Supabase-managed) |
+| **Redis Sessions** | Required | Optional (only for rate limiting/caching) |
+
+### 3.3 Removed Endpoints
+
+These endpoints are **no longer needed** in the Go API:
+
+```
+❌ POST /api/v1/auth/register    → Handled by Supabase
+❌ POST /api/v1/auth/login       → Handled by Supabase  
+❌ POST /api/v1/auth/refresh     → Handled by Supabase client
+❌ POST /api/v1/auth/logout      → Handled by Supabase client
+```
+
+### 3.4 Kept/Modified Endpoints
+
+```
+✅ GET  /api/v1/auth/me          → Validates JWT, returns user profile from Supabase
+✅ All other endpoints           → Protected by Supabase JWT middleware
 ```
 
 ---
 
-## 5. Login
+## 4. Authentication Flow
 
-### 5.1 Endpoint
-
-```
-POST /api/v1/auth/login
-```
-
-### 5.2 Request
-
-```json
-{
-  "email": "user@example.com",
-  "password": "SecureP@ssw0rd!"
-}
-```
-
-### 5.3 Success Response (200 OK)
-
-```json
-{
-  "user": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "email": "user@example.com",
-    "created_at": "2024-12-27T10:00:00Z"
-  },
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
-
-**Response Headers:**
-```
-Set-Cookie: refresh_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...; 
-            HttpOnly; 
-            Secure; 
-            SameSite=Strict; 
-            Path=/api/v1/auth; 
-            Max-Age=604800
-```
-
-### 5.4 Error Responses
-
-**Invalid Credentials (401 Unauthorized):**
-```json
-{
-  "error": {
-    "code": "INVALID_CREDENTIALS",
-    "message": "Invalid email or password"
-  }
-}
-```
-
-> **Security Note:** We don't reveal whether the email exists or the password is wrong. This prevents email enumeration attacks.
-
-### 5.5 Login Flow Diagram
+### 4.1 Sign Up Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       POST /api/v1/auth/login                        │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │
-                                ▼
-                    ┌───────────────────────┐
-                    │   Find User by Email  │
-                    └───────────┬───────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │ Not Found       │                 │ Found
-              ▼                 │                 ▼
-    ┌─────────────────┐         │       ┌─────────────────┐
-    │ Return 401      │         │       │ Compare Password│
-    │ INVALID_CREDS   │         │       │ (bcrypt verify) │
-    └─────────────────┘         │       └────────┬────────┘
-                                │                │
-                                │  ┌─────────────┼─────────────┐
-                                │  │ Mismatch    │             │ Match
-                                │  ▼             │             ▼
-                                │  ┌─────────────┐   ┌─────────────────┐
-                                │  │ Return 401  │   │ Invalidate Old  │
-                                │  │ INVALID_CREDS   │ Refresh Tokens  │
-                                │  └─────────────┘   └────────┬────────┘
-                                │                             │
-                                │                    ┌────────▼────────┐
-                                │                    │ Generate Tokens │
-                                │                    │ Access + Refresh│
-                                │                    └────────┬────────┘
-                                │                             │
-                                │                    ┌────────▼────────┐
-                                │                    │ Store Refresh   │
-                                │                    │ Token Hash in DB│
-                                │                    └────────┬────────┘
-                                │                             │
-                                │                    ┌────────▼────────┐
-                                │                    │ Return 200      │
-                                │                    │ + Set Cookie    │
-                                │                    └─────────────────┘
+┌──────────┐                    ┌──────────┐                    ┌──────────┐
+│ Frontend │                    │ Supabase │                    │  Go API  │
+└────┬─────┘                    └────┬─────┘                    └────┬─────┘
+     │                               │                               │
+     │  supabase.auth.signUp({      │                               │
+     │    email, password           │                               │
+     │  })                          │                               │
+     │─────────────────────────────▶│                               │
+     │                               │                               │
+     │                               │  Creates user in auth.users  │
+     │                               │  Sends verification email    │
+     │                               │                               │
+     │  { user, session }            │                               │
+     │◀─────────────────────────────│                               │
+     │                               │                               │
+     │  (Optional) Create profile   │                               │
+     │  POST /api/v1/users/profile  │                               │
+     │  Authorization: Bearer <jwt> │                               │
+     │──────────────────────────────────────────────────────────────▶
+     │                               │                               │
+     │                               │  Verify JWT, create profile  │
+     │                               │  in public.user_profiles     │
+     │                               │                               │
+     │  { profile }                  │                               │
+     │◀──────────────────────────────────────────────────────────────│
+```
+
+### 4.2 Sign In Flow
+
+```
+┌──────────┐                    ┌──────────┐                    ┌──────────┐
+│ Frontend │                    │ Supabase │                    │  Go API  │
+└────┬─────┘                    └────┬─────┘                    └────┬─────┘
+     │                               │                               │
+     │  supabase.auth.signInWith    │                               │
+     │  Password({ email, password })│                               │
+     │─────────────────────────────▶│                               │
+     │                               │                               │
+     │                               │  Validates credentials       │
+     │                               │  Creates session             │
+     │                               │  Issues JWT                  │
+     │                               │                               │
+     │  { user, session: {          │                               │
+     │    access_token,             │                               │
+     │    refresh_token,            │                               │
+     │    expires_at                │                               │
+     │  }}                          │                               │
+     │◀─────────────────────────────│                               │
+     │                               │                               │
+     │  Store session (automatic)   │                               │
+     │                               │                               │
+     │  GET /api/v1/transactions    │                               │
+     │  Authorization: Bearer <jwt> │                               │
+     │──────────────────────────────────────────────────────────────▶
+     │                               │                               │
+     │                               │                 Verify JWT   │
+     │                               │                 Extract user │
+     │                               │                 Return data  │
+     │  { transactions: [...] }     │                               │
+     │◀──────────────────────────────────────────────────────────────│
+```
+
+### 4.3 Token Refresh Flow
+
+Supabase client handles this **automatically**:
+
+```
+┌──────────┐                    ┌──────────┐
+│ Frontend │                    │ Supabase │
+└────┬─────┘                    └────┬─────┘
+     │                               │
+     │  (Automatic when token        │
+     │   expires in < 60 seconds)    │
+     │                               │
+     │  POST /auth/v1/token?         │
+     │  grant_type=refresh_token     │
+     │─────────────────────────────▶│
+     │                               │
+     │  { access_token, ...}         │
+     │◀─────────────────────────────│
+     │                               │
+     │  Session updated in memory   │
+```
+
+### 4.4 WebSocket Authentication
+
+For real-time chat, pass the JWT as a query parameter:
+
+```
+┌──────────┐                                      ┌──────────┐
+│ Frontend │                                      │  Go API  │
+└────┬─────┘                                      └────┬─────┘
+     │                                                 │
+     │  const token = session.access_token            │
+     │                                                 │
+     │  WebSocket Connect                              │
+     │  ws://api/v1/ws?token=<jwt>                    │
+     │════════════════════════════════════════════════▶
+     │                                                 │
+     │                              Validate JWT from │
+     │                              query parameter   │
+     │                              Upgrade connection│
+     │                                                 │
+     │◀════════════════════════════════════════════════│
+     │  Connection Established                         │
 ```
 
 ---
 
-## 6. Token Refresh
+## 5. Frontend Integration
 
-### 6.1 When to Refresh
-
-The frontend should refresh the access token:
-1. **Proactively:** Before expiration (e.g., when 2 minutes remaining)
-2. **Reactively:** When receiving a 401 response
-
-### 6.2 Endpoint
-
-```
-POST /api/v1/auth/refresh
-```
-
-### 6.3 Request
-
-No body required. The refresh token is sent automatically via the HttpOnly cookie.
-
-### 6.4 Success Response (200 OK)
-
-```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
-
-**Response Headers:**
-```
-Set-Cookie: refresh_token=<new-refresh-token>; HttpOnly; Secure; ...
-```
-
-> **Note:** We rotate the refresh token on each use (refresh token rotation). This limits the window of opportunity if a refresh token is somehow compromised.
-
-### 6.5 Error Responses
-
-**Invalid/Expired Refresh Token (401 Unauthorized):**
-```json
-{
-  "error": {
-    "code": "INVALID_REFRESH_TOKEN",
-    "message": "Please log in again"
-  }
-}
-```
-
-### 6.6 Token Refresh Flow
-
-```
-┌──────────┐          ┌──────────┐          ┌──────────┐
-│ Frontend │          │  Go API  │          │ Database │
-└────┬─────┘          └────┬─────┘          └────┬─────┘
-     │                     │                     │
-     │  Access token       │                     │
-     │  expires soon       │                     │
-     │  (or got 401)       │                     │
-     │                     │                     │
-     │  POST /auth/refresh │                     │
-     │  Cookie: refresh_token=...                │
-     │────────────────────▶│                     │
-     │                     │                     │
-     │                     │  1. Extract refresh │
-     │                     │  token from cookie  │
-     │                     │                     │
-     │                     │  2. Validate JWT    │
-     │                     │  signature & expiry │
-     │                     │                     │
-     │                     │  3. Check token in  │
-     │                     │  database (not      │
-     │                     │  revoked)           │
-     │                     │────────────────────▶│
-     │                     │◀────────────────────│
-     │                     │                     │
-     │                     │  4. Delete old      │
-     │                     │  refresh token      │
-     │                     │────────────────────▶│
-     │                     │                     │
-     │                     │  5. Generate new    │
-     │                     │  token pair         │
-     │                     │                     │
-     │                     │  6. Store new       │
-     │                     │  refresh token hash │
-     │                     │────────────────────▶│
-     │                     │                     │
-     │  { access_token }   │                     │
-     │  Set-Cookie: new refresh                  │
-     │◀────────────────────│                     │
-     │                     │                     │
-     │  Store new access   │                     │
-     │  token in memory    │                     │
-```
-
-### 6.7 Frontend Refresh Logic
+### 5.1 Supabase Client Setup
 
 ```typescript
-// lib/auth.ts
+// lib/supabase/client.ts
+import { createBrowserClient } from '@supabase/ssr'
 
-class AuthManager {
-  private accessToken: string | null = null;
-  private refreshPromise: Promise<string> | null = null;
-
-  async getAccessToken(): Promise<string | null> {
-    // If token exists and not expiring soon, return it
-    if (this.accessToken && !this.isTokenExpiringSoon()) {
-      return this.accessToken;
-    }
-
-    // If already refreshing, wait for that to complete
-    if (this.refreshPromise) {
-      return this.refreshPromise;
-    }
-
-    // Start refresh
-    this.refreshPromise = this.refreshAccessToken();
-    
-    try {
-      this.accessToken = await this.refreshPromise;
-      return this.accessToken;
-    } finally {
-      this.refreshPromise = null;
-    }
-  }
-
-  private isTokenExpiringSoon(): boolean {
-    if (!this.accessToken) return true;
-    
-    const payload = this.decodeToken(this.accessToken);
-    const expiresAt = payload.exp * 1000; // Convert to milliseconds
-    const now = Date.now();
-    const twoMinutes = 2 * 60 * 1000;
-    
-    return expiresAt - now < twoMinutes;
-  }
-
-  private async refreshAccessToken(): Promise<string> {
-    const response = await fetch('/api/v1/auth/refresh', {
-      method: 'POST',
-      credentials: 'include', // Include cookies
-    });
-
-    if (!response.ok) {
-      // Refresh failed, user needs to login again
-      this.accessToken = null;
-      window.location.href = '/login';
-      throw new Error('Session expired');
-    }
-
-    const data = await response.json();
-    return data.access_token;
-  }
-
-  private decodeToken(token: string): { sub: string; exp: number } {
-    const payload = token.split('.')[1];
-    return JSON.parse(atob(payload));
-  }
+export function createClient() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
 }
-
-export const authManager = new AuthManager();
 ```
 
----
+```typescript
+// lib/supabase/server.ts
+import { createServerClient } from '@supabase/ssr'
+import { cookies } from 'next/headers'
 
-## 7. Request Authentication
+export async function createClient() {
+  const cookieStore = await cookies()
 
-### 7.1 Making Authenticated Requests
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll()
+        },
+        setAll(cookiesToSet) {
+          try {
+            cookiesToSet.forEach(({ name, value, options }) =>
+              cookieStore.set(name, value, options)
+            )
+          } catch {
+            // Called from Server Component
+          }
+        },
+      },
+    }
+  )
+}
+```
 
-**Frontend API Client:**
+### 5.2 Auth Hook
+
+```typescript
+// hooks/useAuth.ts
+"use client"
+
+import { createClient } from '@/lib/supabase/client'
+import { User, Session } from '@supabase/supabase-js'
+import { useEffect, useState } from 'react'
+
+export function useAuth() {
+  const [user, setUser] = useState<User | null>(null)
+  const [session, setSession] = useState<Session | null>(null)
+  const [loading, setLoading] = useState(true)
+  
+  const supabase = createClient()
+
+  useEffect(() => {
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session)
+      setUser(session?.user ?? null)
+      setLoading(false)
+    })
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setSession(session)
+        setUser(session?.user ?? null)
+      }
+    )
+
+    return () => subscription.unsubscribe()
+  }, [])
+
+  const signUp = async (email: string, password: string) => {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+    })
+    return { data, error }
+  }
+
+  const signIn = async (email: string, password: string) => {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    })
+    return { data, error }
+  }
+
+  const signOut = async () => {
+    const { error } = await supabase.auth.signOut()
+    return { error }
+  }
+
+  const getAccessToken = async () => {
+    const { data } = await supabase.auth.getSession()
+    return data.session?.access_token
+  }
+
+  return {
+    user,
+    session,
+    loading,
+    signUp,
+    signIn,
+    signOut,
+    getAccessToken,
+  }
+}
+```
+
+### 5.3 API Client with Auth
 
 ```typescript
 // lib/api.ts
+import { createClient } from '@/lib/supabase/client'
 
-import { authManager } from './auth';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
 
-class ApiClient {
-  private baseUrl = process.env.NEXT_PUBLIC_API_URL;
-
-  async fetch<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-    const accessToken = await authManager.getAccessToken();
-
-    const response = await fetch(`${this.baseUrl}${endpoint}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(accessToken && { Authorization: `Bearer ${accessToken}` }),
-        ...options.headers,
-      },
-      credentials: 'include', // For refresh token cookie
-    });
-
-    // Handle 401 - token might have been invalidated server-side
-    if (response.status === 401) {
-      // Try refresh once
-      const newToken = await authManager.refreshAccessToken();
-      if (newToken) {
-        // Retry the request
-        return this.fetch(endpoint, options);
-      }
-      throw new Error('Unauthorized');
-    }
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.message || 'Request failed');
-    }
-
-    return response.json();
+async function getAuthHeaders(): Promise<HeadersInit> {
+  const supabase = createClient()
+  const { data: { session } } = await supabase.auth.getSession()
+  
+  if (!session?.access_token) {
+    throw new Error('Not authenticated')
   }
 
-  get<T>(endpoint: string): Promise<T> {
-    return this.fetch(endpoint, { method: 'GET' });
-  }
-
-  post<T>(endpoint: string, data: unknown): Promise<T> {
-    return this.fetch(endpoint, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+  return {
+    'Authorization': `Bearer ${session.access_token}`,
+    'Content-Type': 'application/json',
   }
 }
 
-export const api = new ApiClient();
+export const api = {
+  // Transactions
+  async getTransactions(params?: { startDate?: string; endDate?: string }) {
+    const headers = await getAuthHeaders()
+    const queryParams = new URLSearchParams(params as Record<string, string>)
+    const response = await fetch(
+      `${API_URL}/api/v1/transactions?${queryParams}`,
+      { headers }
+    )
+    if (!response.ok) throw new Error('Failed to fetch transactions')
+    return response.json()
+  },
+
+  async syncTransactions() {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_URL}/api/v1/transactions/sync`, {
+      method: 'POST',
+      headers,
+    })
+    if (!response.ok) throw new Error('Failed to sync transactions')
+    return response.json()
+  },
+
+  // Accounts
+  async getAccounts() {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_URL}/api/v1/accounts`, { headers })
+    if (!response.ok) throw new Error('Failed to fetch accounts')
+    return response.json()
+  },
+
+  // Plaid
+  async createLinkToken() {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_URL}/api/v1/plaid/link-token`, {
+      method: 'POST',
+      headers,
+    })
+    if (!response.ok) throw new Error('Failed to create link token')
+    return response.json()
+  },
+
+  async exchangePublicToken(publicToken: string) {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_URL}/api/v1/plaid/exchange`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ public_token: publicToken }),
+    })
+    if (!response.ok) throw new Error('Failed to exchange token')
+    return response.json()
+  },
+
+  // Spending
+  async getSpendingSummary(period?: string) {
+    const headers = await getAuthHeaders()
+    const response = await fetch(
+      `${API_URL}/api/v1/spending/summary${period ? `?period=${period}` : ''}`,
+      { headers }
+    )
+    if (!response.ok) throw new Error('Failed to fetch spending summary')
+    return response.json()
+  },
+}
 ```
 
-### 7.2 Go API Middleware
+### 5.4 WebSocket Client with Auth
+
+```typescript
+// lib/websocket.ts
+import { createClient } from '@/lib/supabase/client'
+
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080'
+
+export class ChatWebSocket {
+  private ws: WebSocket | null = null
+  private reconnectAttempts = 0
+  private maxReconnectAttempts = 5
+
+  async connect(
+    onMessage: (data: ServerMessage) => void,
+    onError: (error: Event) => void
+  ) {
+    const supabase = createClient()
+    const { data: { session } } = await supabase.auth.getSession()
+    
+    if (!session?.access_token) {
+      throw new Error('Not authenticated')
+    }
+
+    const token = encodeURIComponent(session.access_token)
+    this.ws = new WebSocket(`${WS_URL}/api/v1/ws?token=${token}`)
+
+    this.ws.onopen = () => {
+      console.log('WebSocket connected')
+      this.reconnectAttempts = 0
+    }
+
+    this.ws.onmessage = (event) => {
+      const data = JSON.parse(event.data) as ServerMessage
+      onMessage(data)
+    }
+
+    this.ws.onerror = onError
+
+    this.ws.onclose = () => {
+      console.log('WebSocket closed')
+      this.attemptReconnect(onMessage, onError)
+    }
+  }
+
+  private attemptReconnect(
+    onMessage: (data: ServerMessage) => void,
+    onError: (error: Event) => void
+  ) {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++
+      setTimeout(() => {
+        console.log(`Reconnecting... (attempt ${this.reconnectAttempts})`)
+        this.connect(onMessage, onError)
+      }, 1000 * this.reconnectAttempts)
+    }
+  }
+
+  send(message: ClientMessage) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message))
+    }
+  }
+
+  disconnect() {
+    this.ws?.close()
+  }
+}
+
+interface ClientMessage {
+  type: 'chat' | 'ping'
+  payload: {
+    message?: string
+    session_id?: string
+  }
+}
+
+interface ServerMessage {
+  type: 'chat_token' | 'chat_complete' | 'error' | 'pong'
+  payload: {
+    token?: string
+    error?: string
+    session_id?: string
+  }
+}
+```
+
+### 5.5 Protected Route Middleware
+
+```typescript
+// middleware.ts
+import { createServerClient } from '@supabase/ssr'
+import { NextResponse, type NextRequest } from 'next/server'
+
+export async function middleware(request: NextRequest) {
+  let supabaseResponse = NextResponse.next({
+    request,
+  })
+
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll()
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value }) =>
+            request.cookies.set(name, value)
+          )
+          supabaseResponse = NextResponse.next({
+            request,
+          })
+          cookiesToSet.forEach(({ name, value, options }) =>
+            supabaseResponse.cookies.set(name, value, options)
+          )
+        },
+      },
+    }
+  )
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  // Protect dashboard routes
+  if (request.nextUrl.pathname.startsWith('/dashboard') && !user) {
+    const url = request.nextUrl.clone()
+    url.pathname = '/sign-in'
+    return NextResponse.redirect(url)
+  }
+
+  // Redirect logged-in users away from auth pages
+  if (
+    (request.nextUrl.pathname.startsWith('/sign-in') ||
+      request.nextUrl.pathname.startsWith('/sign-up')) &&
+    user
+  ) {
+    const url = request.nextUrl.clone()
+    url.pathname = '/dashboard'
+    return NextResponse.redirect(url)
+  }
+
+  return supabaseResponse
+}
+
+export const config = {
+  matcher: ['/dashboard/:path*', '/sign-in', '/sign-up'],
+}
+```
+
+---
+
+## 6. Backend JWT Validation
+
+### 6.1 Go API Middleware
 
 ```go
 // internal/middleware/auth.go
-
 package middleware
 
 import (
@@ -691,621 +694,669 @@ import (
 )
 
 type Claims struct {
+    Sub   string `json:"sub"`
     Email string `json:"email"`
-    Type  string `json:"type"`
+    Role  string `json:"role"`
     jwt.RegisteredClaims
 }
 
-func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
+type AuthMiddleware struct {
+    jwtSecret []byte
+}
+
+func NewAuthMiddleware(jwtSecret string) *AuthMiddleware {
+    return &AuthMiddleware{
+        jwtSecret: []byte(jwtSecret),
+    }
+}
+
+// RequireAuth validates the Supabase JWT and extracts user info
+func (m *AuthMiddleware) RequireAuth() gin.HandlerFunc {
     return func(c *gin.Context) {
-        // 1. Extract token from Authorization header
+        // Extract token from Authorization header
         authHeader := c.GetHeader("Authorization")
         if authHeader == "" {
             c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-                "error": gin.H{
-                    "code":    "MISSING_TOKEN",
-                    "message": "Authorization header required",
-                },
+                "error": "Authorization header required",
             })
             return
         }
 
-        // 2. Parse "Bearer <token>"
+        // Check Bearer prefix
         parts := strings.Split(authHeader, " ")
         if len(parts) != 2 || parts[0] != "Bearer" {
             c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-                "error": gin.H{
-                    "code":    "INVALID_TOKEN_FORMAT",
-                    "message": "Invalid authorization header format",
-                },
+                "error": "Invalid authorization header format",
             })
             return
         }
 
         tokenString := parts[1]
 
-        // 3. Parse and validate JWT
-        claims := &Claims{}
-        token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-            return []byte(jwtSecret), nil
+        // Parse and validate the JWT
+        token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+            // Validate signing method
+            if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+                return nil, jwt.ErrSignatureInvalid
+            }
+            return m.jwtSecret, nil
         })
 
-        if err != nil || !token.Valid {
+        if err != nil {
             c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-                "error": gin.H{
-                    "code":    "INVALID_TOKEN",
-                    "message": "Invalid or expired token",
-                },
+                "error": "Invalid token",
             })
             return
         }
 
-        // 4. Verify it's an access token (not refresh)
-        if claims.Type != "access" {
+        // Extract claims
+        claims, ok := token.Claims.(*Claims)
+        if !ok || !token.Valid {
             c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-                "error": gin.H{
-                    "code":    "WRONG_TOKEN_TYPE",
-                    "message": "Invalid token type",
-                },
+                "error": "Invalid token claims",
             })
             return
         }
 
-        // 5. Attach user info to context
-        c.Set("user_id", claims.Subject)
+        // Verify the role is "authenticated"
+        if claims.Role != "authenticated" {
+            c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+                "error": "User not authenticated",
+            })
+            return
+        }
+
+        // Set user info in context
+        c.Set("user_id", claims.Sub)
         c.Set("user_email", claims.Email)
 
         c.Next()
     }
 }
 
-// Helper to get user ID from context
+// GetUserID retrieves the user ID from the context
 func GetUserID(c *gin.Context) string {
-    userID, exists := c.Get("user_id")
-    if !exists {
-        return ""
-    }
+    userID, _ := c.Get("user_id")
     return userID.(string)
 }
-```
 
-### 7.3 Protected Route Example
-
-```go
-// internal/handlers/transactions.go
-
-func (h *TransactionHandler) GetTransactions(c *gin.Context) {
-    // User ID is already validated and attached by middleware
-    userID := middleware.GetUserID(c)
-
-    transactions, err := h.transactionService.GetByUserID(c, userID)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-        return
-    }
-
-    c.JSON(http.StatusOK, gin.H{"transactions": transactions})
+// GetUserEmail retrieves the user email from the context
+func GetUserEmail(c *gin.Context) string {
+    email, _ := c.Get("user_email")
+    return email.(string)
 }
 ```
 
----
-
-## 8. Cross-Service Authentication
-
-### 8.1 Trust Model
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           TRUST BOUNDARY                             │
-│                                                                      │
-│  ┌──────────────────────┐         ┌──────────────────────┐          │
-│  │       Go API         │  gRPC   │     Python AI        │          │
-│  │                      │────────▶│                      │          │
-│  │  • Validates JWT     │         │  • Trusts Go API     │          │
-│  │  • Authoritative     │         │  • No JWT validation │          │
-│  │    for auth          │         │  • Uses user_id from │          │
-│  │                      │         │    metadata          │          │
-│  └──────────────────────┘         └──────────────────────┘          │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
-                              ▲
-                              │
-                    External requests go through
-                    Go API only. Python AI is not
-                    exposed to the internet.
-```
-
-### 8.2 Why Python AI Doesn't Validate JWTs
-
-1. **Single Point of Auth:** Go API is the only entry point; centralizing auth logic
-2. **Simplicity:** Python service stays focused on AI tasks
-3. **Performance:** Avoids duplicate validation on every request
-4. **Security:** Python service is not exposed externally
-
-### 8.3 Passing User Context via gRPC
-
-**Go API → Python AI:**
-
-```go
-// internal/services/ai.go
-
-func (s *AIService) CategorizeTransactions(ctx context.Context, userID string, txns []Transaction) ([]CategorizedTransaction, error) {
-    // Add user_id to gRPC metadata
-    md := metadata.New(map[string]string{
-        "user_id": userID,
-    })
-    ctx = metadata.NewOutgoingContext(ctx, md)
-
-    // Make gRPC call
-    resp, err := s.client.CategorizeTransactions(ctx, &pb.CategorizeRequest{
-        Transactions: convertTransactions(txns),
-    })
-    
-    return convertResponse(resp), err
-}
-```
-
-**Python AI receiving context:**
-
-```python
-# app/services/categorizer.py
-
-from grpc import ServicerContext
-
-class AIServicer(ai_pb2_grpc.AIServiceServicer):
-    def CategorizeTransactions(
-        self, 
-        request: ai_pb2.CategorizeRequest, 
-        context: ServicerContext
-    ) -> ai_pb2.CategorizeResponse:
-        # Extract user_id from metadata
-        metadata = dict(context.invocation_metadata())
-        user_id = metadata.get('user_id')
-        
-        if not user_id:
-            context.abort(grpc.StatusCode.UNAUTHENTICATED, 'Missing user_id')
-        
-        # Use user_id for logging, personalization, etc.
-        logger.info(f"Categorizing transactions for user {user_id}")
-        
-        # Process categorization...
-        return self._categorize(request.transactions)
-```
-
-### 8.4 Internal Service Security
-
-| Measure | Implementation |
-|---------|----------------|
-| **Network Isolation** | Python AI only accessible within Docker network |
-| **No External Port** | Port 50051 not exposed to host in production |
-| **Request Origin** | Only Go API knows Python AI's address |
-| **Metadata Validation** | Python checks for required metadata |
-
----
-
-## 9. WebSocket Authentication
-
-### 9.1 Authentication Flow
-
-WebSockets require special handling since you can't set headers after the initial handshake.
-
-```
-┌──────────┐                           ┌──────────┐
-│ Frontend │                           │  Go API  │
-└────┬─────┘                           └────┬─────┘
-     │                                      │
-     │  1. Get access token from AuthManager│
-     │                                      │
-     │  2. Connect WebSocket                │
-     │  ws://api/v1/ws?token=<access_token> │
-     │═════════════════════════════════════▶│
-     │                                      │
-     │                                      │  3. Extract token from
-     │                                      │  query parameter
-     │                                      │
-     │                                      │  4. Validate JWT
-     │                                      │  (same as HTTP)
-     │                                      │
-     │              ┌───────────────────────┼───────────────────────┐
-     │              │ Invalid               │                       │ Valid
-     │              ▼                       │                       ▼
-     │  ┌─────────────────────┐             │         ┌─────────────────────┐
-     │  │ Close connection    │             │         │ Upgrade connection  │
-     │  │ with error code     │             │         │ Store user context  │
-     │  └─────────────────────┘             │         └─────────────────────┘
-     │                                      │
-     │◀═══════Connection Established════════│
-     │                                      │
-     │  { type: "chat", message: "Hi" }     │
-     │─────────────────────────────────────▶│
-     │                                      │
-     │                                      │  5. User context already
-     │                                      │  associated with connection
-     │                                      │
-     │◀═════════Stream response═════════════│
-```
-
-### 9.2 Go WebSocket Handler
+### 6.2 Go WebSocket Authentication
 
 ```go
 // internal/handlers/websocket.go
+package handlers
 
-func (h *WebSocketHandler) HandleConnection(c *gin.Context) {
-    // 1. Get token from query parameter
+import (
+    "net/http"
+
+    "github.com/gin-gonic/gin"
+    "github.com/golang-jwt/jwt/v5"
+    "github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool {
+        // In production, validate against allowed origins
+        return true
+    },
+}
+
+type WebSocketHandler struct {
+    jwtSecret []byte
+    hub       *Hub
+}
+
+func (h *WebSocketHandler) HandleWebSocket(c *gin.Context) {
+    // Get token from query parameter
     tokenString := c.Query("token")
     if tokenString == "" {
         c.JSON(http.StatusUnauthorized, gin.H{"error": "Token required"})
         return
     }
 
-    // 2. Validate token (reuse auth logic)
-    claims, err := h.authService.ValidateAccessToken(tokenString)
-    if err != nil {
+    // Parse and validate JWT
+    token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+        return h.jwtSecret, nil
+    })
+
+    if err != nil || !token.Valid {
         c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
         return
     }
 
-    // 3. Upgrade to WebSocket
-    conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
+    claims := token.Claims.(*Claims)
+
+    // Upgrade to WebSocket
+    conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
     if err != nil {
         return
     }
-    defer conn.Close()
 
-    // 4. Create client with user context
-    client := &websocket.Client{
-        Conn:   conn,
-        UserID: claims.Subject,
-        Hub:    h.hub,
+    // Create client with user context
+    client := &Client{
+        hub:    h.hub,
+        conn:   conn,
+        send:   make(chan []byte, 256),
+        userID: claims.Sub,
+        email:  claims.Email,
     }
 
-    // 5. Register client and start handling messages
-    h.hub.Register(client)
-    defer h.hub.Unregister(client)
+    h.hub.register <- client
 
-    client.HandleMessages()
+    go client.writePump()
+    go client.readPump()
 }
 ```
 
-### 9.3 Frontend WebSocket Client
+### 6.3 Python AI Service (gRPC Context)
 
-```typescript
-// lib/websocket.ts
+For the Python AI service, the Go API passes user context via gRPC metadata:
 
-import { authManager } from './auth';
+```python
+# services/ai/app/interceptors/auth.py
+import grpc
 
-class ChatWebSocket {
-  private ws: WebSocket | null = null;
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-
-  async connect(onMessage: (data: ServerMessage) => void): Promise<void> {
-    const token = await authManager.getAccessToken();
-    if (!token) {
-      throw new Error('Not authenticated');
-    }
-
-    const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL}/api/v1/ws?token=${token}`;
+class AuthInterceptor(grpc.ServerInterceptor):
+    """Extract user context from gRPC metadata."""
     
-    this.ws = new WebSocket(wsUrl);
-
-    this.ws.onopen = () => {
-      console.log('WebSocket connected');
-      this.reconnectAttempts = 0;
-    };
-
-    this.ws.onmessage = (event) => {
-      const data = JSON.parse(event.data) as ServerMessage;
-      onMessage(data);
-    };
-
-    this.ws.onclose = (event) => {
-      if (event.code === 4001) {
-        // Token expired, try to refresh and reconnect
-        this.handleTokenExpired(onMessage);
-      } else if (this.reconnectAttempts < this.maxReconnectAttempts) {
-        // Attempt reconnection with backoff
-        const delay = Math.pow(2, this.reconnectAttempts) * 1000;
-        setTimeout(() => {
-          this.reconnectAttempts++;
-          this.connect(onMessage);
-        }, delay);
-      }
-    };
-
-    this.ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
-  }
-
-  private async handleTokenExpired(onMessage: (data: ServerMessage) => void) {
-    try {
-      await authManager.refreshAccessToken();
-      this.connect(onMessage);
-    } catch {
-      // Refresh failed, redirect to login
-      window.location.href = '/login';
-    }
-  }
-
-  send(message: ClientMessage): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(message));
-    }
-  }
-
-  disconnect(): void {
-    this.ws?.close();
-    this.ws = null;
-  }
-}
-
-export const chatWebSocket = new ChatWebSocket();
+    def intercept_service(self, continuation, handler_call_details):
+        # User context is passed from Go API via metadata
+        metadata = dict(handler_call_details.invocation_metadata)
+        
+        # Store in context for handlers to access
+        handler_call_details.user_id = metadata.get('x-user-id', '')
+        handler_call_details.user_email = metadata.get('x-user-email', '')
+        
+        return continuation(handler_call_details)
 ```
 
-### 9.4 WebSocket Close Codes
-
-| Code | Meaning | Client Action |
-|------|---------|---------------|
-| 1000 | Normal closure | None |
-| 4001 | Token expired | Refresh token, reconnect |
-| 4002 | Invalid token | Redirect to login |
-| 4003 | Token revoked | Redirect to login |
-
----
-
-## 10. Password Security
-
-### 10.1 Hashing Strategy
-
-We use **bcrypt** with a cost factor of 12:
-
 ```go
-// internal/services/auth.go
+// Go API: Pass user context to Python AI service
+func (s *AIServiceClient) CategorizeTransactions(ctx context.Context, userID string, txns []*Transaction) ([]*CategorizedTransaction, error) {
+    // Add user context to gRPC metadata
+    md := metadata.New(map[string]string{
+        "x-user-id": userID,
+    })
+    ctx = metadata.NewOutgoingContext(ctx, md)
 
-import "golang.org/x/crypto/bcrypt"
-
-const bcryptCost = 12
-
-func (s *AuthService) HashPassword(password string) (string, error) {
-    bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-    return string(bytes), err
-}
-
-func (s *AuthService) VerifyPassword(password, hash string) bool {
-    err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-    return err == nil
-}
-```
-
-### 10.2 Why bcrypt?
-
-| Property | Benefit |
-|----------|---------|
-| **Adaptive cost** | Can increase work factor as hardware improves |
-| **Built-in salt** | Each hash includes unique salt, prevents rainbow tables |
-| **Slow by design** | Makes brute-force attacks impractical |
-| **Battle-tested** | Widely used and analyzed |
-
-### 10.3 Password Requirements
-
-| Requirement | Minimum |
-|-------------|---------|
-| Length | 8 characters |
-| Uppercase | 1 character |
-| Lowercase | 1 character |
-| Number | 1 digit |
-| Special | Optional (recommended) |
-
-```go
-// pkg/validator/password.go
-
-import "regexp"
-
-var (
-    hasUpper   = regexp.MustCompile(`[A-Z]`)
-    hasLower   = regexp.MustCompile(`[a-z]`)
-    hasNumber  = regexp.MustCompile(`[0-9]`)
-)
-
-func ValidatePassword(password string) []string {
-    var errors []string
-
-    if len(password) < 8 {
-        errors = append(errors, "Password must be at least 8 characters")
-    }
-    if !hasUpper.MatchString(password) {
-        errors = append(errors, "Password must contain at least one uppercase letter")
-    }
-    if !hasLower.MatchString(password) {
-        errors = append(errors, "Password must contain at least one lowercase letter")
-    }
-    if !hasNumber.MatchString(password) {
-        errors = append(errors, "Password must contain at least one number")
-    }
-
-    return errors
+    resp, err := s.client.CategorizeTransactions(ctx, &pb.CategorizeRequest{
+        Transactions: txns,
+    })
+    return resp.Results, err
 }
 ```
 
 ---
 
-## 11. Security Considerations
+## 7. Database Integration
 
-### 11.1 Token Security
+### 7.1 Supabase Schema
 
-| Threat | Mitigation |
-|--------|------------|
-| **XSS stealing tokens** | Access token in memory only; refresh in HttpOnly cookie |
-| **Token theft** | Short access token lifetime (15 min) |
-| **Refresh token theft** | HttpOnly, Secure, SameSite=Strict cookies |
-| **Token replay** | Check token expiration, rotate refresh tokens |
-| **Token forgery** | Strong JWT secret (256+ bits), HS256 signature |
-
-### 11.2 Cookie Configuration
-
-```go
-// Setting refresh token cookie
-
-http.SetCookie(w, &http.Cookie{
-    Name:     "refresh_token",
-    Value:    refreshToken,
-    Path:     "/api/v1/auth",      // Only sent to auth endpoints
-    HttpOnly: true,                 // Not accessible via JavaScript
-    Secure:   true,                 // Only sent over HTTPS
-    SameSite: http.SameSiteStrictMode,  // Not sent with cross-site requests
-    MaxAge:   7 * 24 * 60 * 60,    // 7 days in seconds
-})
-```
-
-### 11.3 Additional Security Measures
-
-| Measure | Implementation |
-|---------|----------------|
-| **Rate Limiting** | Limit login attempts (5/min per IP, 3/min per email) |
-| **Account Lockout** | Lock after 10 failed attempts, unlock after 15 min |
-| **Secure Headers** | HSTS, X-Frame-Options, X-Content-Type-Options |
-| **CORS** | Whitelist only frontend origin |
-| **Timing Attacks** | Constant-time password comparison (bcrypt does this) |
-| **Logging** | Log auth events (login, logout, failed attempts) |
-
-### 11.4 Logout
-
-```
-POST /api/v1/auth/logout
-```
-
-**Actions:**
-1. Delete refresh token from database (invalidate it)
-2. Clear refresh token cookie
-3. Client discards access token from memory
-
-```go
-func (h *AuthHandler) Logout(c *gin.Context) {
-    // Get refresh token from cookie
-    refreshToken, err := c.Cookie("refresh_token")
-    if err == nil {
-        // Invalidate in database
-        h.authService.RevokeRefreshToken(c, refreshToken)
-    }
-
-    // Clear the cookie
-    c.SetCookie("refresh_token", "", -1, "/api/v1/auth", "", true, true)
-
-    c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
-}
-```
-
----
-
-## 12. Implementation Details
-
-### 12.1 JWT Secret
-
-Generate a strong secret (at least 256 bits):
-
-```bash
-# Generate a secure secret
-openssl rand -base64 32
-# Output: Kx9Ej3QoP8mN1rT5wY7uI0aS2dF4gH6jL8zX3cV5bM0=
-```
-
-Store in environment variable:
-```bash
-JWT_SECRET=Kx9Ej3QoP8mN1rT5wY7uI0aS2dF4gH6jL8zX3cV5bM0=
-```
-
-### 12.2 Token Generation
-
-```go
-// internal/services/auth.go
-
-func (s *AuthService) GenerateTokenPair(user *models.User) (accessToken, refreshToken string, err error) {
-    // Access token (15 minutes)
-    accessClaims := jwt.MapClaims{
-        "sub":   user.ID.String(),
-        "email": user.Email,
-        "type":  "access",
-        "iat":   time.Now().Unix(),
-        "exp":   time.Now().Add(15 * time.Minute).Unix(),
-    }
-    accessToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, accessClaims).SignedString([]byte(s.jwtSecret))
-    if err != nil {
-        return "", "", err
-    }
-
-    // Refresh token (7 days)
-    jti := uuid.New().String()
-    refreshClaims := jwt.MapClaims{
-        "sub":  user.ID.String(),
-        "type": "refresh",
-        "jti":  jti,
-        "iat":  time.Now().Unix(),
-        "exp":  time.Now().Add(7 * 24 * time.Hour).Unix(),
-    }
-    refreshToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims).SignedString([]byte(s.jwtSecret))
-    if err != nil {
-        return "", "", err
-    }
-
-    // Store refresh token hash in database for revocation
-    err = s.storeRefreshToken(user.ID, jti, time.Now().Add(7*24*time.Hour))
-    if err != nil {
-        return "", "", err
-    }
-
-    return accessToken, refreshToken, nil
-}
-```
-
-### 12.3 Database Tables
+Supabase automatically creates the `auth.users` table. We create additional tables in the `public` schema:
 
 ```sql
--- Refresh token tracking for revocation
-CREATE TABLE refresh_tokens (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    jti VARCHAR(255) NOT NULL UNIQUE,  -- Token ID from JWT
-    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+-- User profiles (extends auth.users)
+CREATE TABLE public.user_profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    display_name VARCHAR(255),
+    avatar_url TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    revoked_at TIMESTAMP WITH TIME ZONE  -- NULL if not revoked
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-CREATE INDEX idx_refresh_tokens_jti ON refresh_tokens(jti);
-CREATE INDEX idx_refresh_tokens_user_id ON refresh_tokens(user_id);
+-- Plaid items (bank connections)
+CREATE TABLE public.plaid_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    access_token_encrypted TEXT NOT NULL,  -- Encrypted with app-level key
+    item_id VARCHAR(255) NOT NULL,
+    institution_id VARCHAR(255),
+    institution_name VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'active',
+    cursor VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
 
--- Clean up expired tokens periodically
--- Run as a scheduled job:
--- DELETE FROM refresh_tokens WHERE expires_at < NOW();
+-- Bank accounts
+CREATE TABLE public.accounts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    plaid_item_id UUID NOT NULL REFERENCES public.plaid_items(id) ON DELETE CASCADE,
+    plaid_account_id VARCHAR(255) NOT NULL,
+    name VARCHAR(255),
+    official_name VARCHAR(255),
+    type VARCHAR(50),
+    subtype VARCHAR(50),
+    mask VARCHAR(10),
+    balance_current DECIMAL(12, 2),
+    balance_available DECIMAL(12, 2),
+    balance_limit DECIMAL(12, 2),
+    currency_code VARCHAR(10) DEFAULT 'USD',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Spending categories
+CREATE TABLE public.categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) NOT NULL UNIQUE,
+    color VARCHAR(7),
+    icon VARCHAR(50),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Seed default categories
+INSERT INTO public.categories (name, color, icon) VALUES
+    ('Food & Dining', '#F59E0B', 'utensils'),
+    ('Groceries', '#10B981', 'shopping-cart'),
+    ('Transportation', '#3B82F6', 'car'),
+    ('Entertainment', '#EC4899', 'film'),
+    ('Shopping', '#F97316', 'shopping-bag'),
+    ('Utilities', '#EAB308', 'zap'),
+    ('Healthcare', '#EF4444', 'heart'),
+    ('Housing', '#8B5CF6', 'home'),
+    ('Travel', '#06B6D4', 'plane'),
+    ('Fitness', '#84CC16', 'dumbbell'),
+    ('Income', '#22C55E', 'dollar-sign'),
+    ('Transfer', '#64748B', 'repeat'),
+    ('Other', '#9CA3AF', 'circle');
+
+-- Transactions
+CREATE TABLE public.transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES public.accounts(id) ON DELETE CASCADE,
+    plaid_transaction_id VARCHAR(255) UNIQUE NOT NULL,
+    amount DECIMAL(12, 2) NOT NULL,
+    date DATE NOT NULL,
+    merchant_name VARCHAR(255),
+    description TEXT,
+    category_id UUID REFERENCES public.categories(id),
+    category_confidence DECIMAL(3, 2),
+    plaid_category VARCHAR(255),
+    plaid_category_id VARCHAR(50),
+    pending BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Chat sessions
+CREATE TABLE public.chat_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    title VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Chat messages
+CREATE TABLE public.chat_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES public.chat_sessions(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX idx_plaid_items_user_id ON public.plaid_items(user_id);
+CREATE INDEX idx_accounts_plaid_item_id ON public.accounts(plaid_item_id);
+CREATE INDEX idx_transactions_account_id ON public.transactions(account_id);
+CREATE INDEX idx_transactions_date ON public.transactions(date);
+CREATE INDEX idx_transactions_category_id ON public.transactions(category_id);
+CREATE INDEX idx_chat_sessions_user_id ON public.chat_sessions(user_id);
+CREATE INDEX idx_chat_messages_session_id ON public.chat_messages(session_id);
 ```
 
-### 12.4 Environment Configuration
+### 7.2 Row Level Security (RLS)
+
+Enable RLS for data isolation between users:
+
+```sql
+-- Enable RLS on all tables
+ALTER TABLE public.user_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.plaid_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.chat_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
+
+-- User profiles: Users can only access their own profile
+CREATE POLICY "Users can view own profile"
+    ON public.user_profiles FOR SELECT
+    USING (auth.uid() = id);
+
+CREATE POLICY "Users can update own profile"
+    ON public.user_profiles FOR UPDATE
+    USING (auth.uid() = id);
+
+CREATE POLICY "Users can insert own profile"
+    ON public.user_profiles FOR INSERT
+    WITH CHECK (auth.uid() = id);
+
+-- Plaid items: Users can only access their own bank connections
+CREATE POLICY "Users can view own plaid items"
+    ON public.plaid_items FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own plaid items"
+    ON public.plaid_items FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update own plaid items"
+    ON public.plaid_items FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own plaid items"
+    ON public.plaid_items FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- Accounts: Users can access accounts linked to their plaid items
+CREATE POLICY "Users can view own accounts"
+    ON public.accounts FOR SELECT
+    USING (
+        plaid_item_id IN (
+            SELECT id FROM public.plaid_items WHERE user_id = auth.uid()
+        )
+    );
+
+-- Transactions: Users can access transactions from their accounts
+CREATE POLICY "Users can view own transactions"
+    ON public.transactions FOR SELECT
+    USING (
+        account_id IN (
+            SELECT a.id FROM public.accounts a
+            JOIN public.plaid_items p ON a.plaid_item_id = p.id
+            WHERE p.user_id = auth.uid()
+        )
+    );
+
+-- Chat sessions: Users can only access their own chat sessions
+CREATE POLICY "Users can view own chat sessions"
+    ON public.chat_sessions FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own chat sessions"
+    ON public.chat_sessions FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own chat sessions"
+    ON public.chat_sessions FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- Chat messages: Users can access messages in their own sessions
+CREATE POLICY "Users can view own chat messages"
+    ON public.chat_messages FOR SELECT
+    USING (
+        session_id IN (
+            SELECT id FROM public.chat_sessions WHERE user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can insert own chat messages"
+    ON public.chat_messages FOR INSERT
+    WITH CHECK (
+        session_id IN (
+            SELECT id FROM public.chat_sessions WHERE user_id = auth.uid()
+        )
+    );
+
+-- Categories: All authenticated users can read categories
+CREATE POLICY "Authenticated users can view categories"
+    ON public.categories FOR SELECT
+    TO authenticated
+    USING (true);
+```
+
+### 7.3 Backend Service Role
+
+For the Go API to bypass RLS (when needed for admin operations), use the service role key:
 
 ```go
 // internal/config/config.go
-
 type Config struct {
-    JWTSecret        string        `env:"JWT_SECRET,required"`
-    AccessTokenTTL   time.Duration `env:"JWT_ACCESS_EXPIRY" envDefault:"15m"`
-    RefreshTokenTTL  time.Duration `env:"JWT_REFRESH_EXPIRY" envDefault:"168h"`
-    BcryptCost       int           `env:"BCRYPT_COST" envDefault:"12"`
+    SupabaseURL        string `env:"SUPABASE_URL"`
+    SupabaseAnonKey    string `env:"SUPABASE_ANON_KEY"`
+    SupabaseServiceKey string `env:"SUPABASE_SERVICE_ROLE_KEY"`  // Bypasses RLS
+    SupabaseJWTSecret  string `env:"SUPABASE_JWT_SECRET"`
+    // ... other config
+}
+```
+
+**Important:** The service role key should **only** be used server-side, never exposed to the client.
+
+---
+
+## 8. Security Considerations
+
+### 8.1 Token Security
+
+| Aspect | Implementation |
+|--------|----------------|
+| **Token Storage (Frontend)** | HttpOnly cookies (handled by Supabase SSR) |
+| **Token Transmission** | Always over HTTPS, Bearer header for REST, query param for WS |
+| **Token Expiration** | Access token: 1 hour, Refresh token: 1 week (configurable) |
+| **Token Refresh** | Automatic via Supabase client |
+
+### 8.2 Environment Variables
+
+```bash
+# .env.local (Frontend - safe to expose ANON key)
+NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+
+# .env (Backend - NEVER expose these)
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_ANON_KEY=eyJ...
+SUPABASE_SERVICE_ROLE_KEY=eyJ...    # Admin access, bypasses RLS
+SUPABASE_JWT_SECRET=your-jwt-secret # From Supabase dashboard
+
+# Connection string for direct database access
+DATABASE_URL=postgresql://postgres:[password]@db.<project-ref>.supabase.co:5432/postgres
+```
+
+### 8.3 Getting the JWT Secret
+
+1. Go to Supabase Dashboard → Project Settings → API
+2. Copy the `JWT Secret` (used for verifying tokens in Go/Python)
+
+### 8.4 CORS Configuration
+
+```go
+// internal/middleware/cors.go
+func CORSMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        c.Header("Access-Control-Allow-Origin", os.Getenv("FRONTEND_URL"))
+        c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+        c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        c.Header("Access-Control-Allow-Credentials", "true")
+        
+        if c.Request.Method == "OPTIONS" {
+            c.AbortWithStatus(http.StatusNoContent)
+            return
+        }
+        c.Next()
+    }
+}
+```
+
+### 8.5 Rate Limiting
+
+Even with Supabase auth, implement rate limiting in Go API:
+
+```go
+// Using Redis for distributed rate limiting
+func RateLimitMiddleware(rdb *redis.Client, limit int, window time.Duration) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        userID := middleware.GetUserID(c)
+        key := fmt.Sprintf("ratelimit:%s", userID)
+        
+        count, err := rdb.Incr(c, key).Result()
+        if err != nil {
+            c.Next()
+            return
+        }
+        
+        if count == 1 {
+            rdb.Expire(c, key, window)
+        }
+        
+        if count > int64(limit) {
+            c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+                "error": "Rate limit exceeded",
+            })
+            return
+        }
+        
+        c.Next()
+    }
 }
 ```
 
 ---
 
-## Summary
+## 9. Implementation Checklist
 
-| Component | Authentication Method |
-|-----------|----------------------|
-| **Frontend → Go API (HTTP)** | Bearer token in Authorization header |
-| **Frontend → Go API (WebSocket)** | Token in query parameter at connection time |
-| **Go API → Python AI (gRPC)** | User ID in gRPC metadata (trusted internal call) |
-| **Token Storage** | Access: memory, Refresh: HttpOnly cookie |
-| **Token Lifetime** | Access: 15min, Refresh: 7 days |
-| **Password Storage** | bcrypt with cost 12 |
+### Phase 1: Supabase Setup
+- [ ] Create Supabase project
+- [ ] Configure auth settings (email/password enabled)
+- [ ] Set up database schema (run SQL above)
+- [ ] Enable Row Level Security policies
+- [ ] Get API keys and JWT secret
+- [ ] Configure email templates (optional)
+
+### Phase 2: Frontend Integration
+- [ ] Install `@supabase/ssr` package
+- [ ] Create Supabase client utilities (browser + server)
+- [ ] Implement `useAuth` hook
+- [ ] Create API client with auth headers
+- [ ] Update sign-in page to use Supabase
+- [ ] Update sign-up page to use Supabase
+- [ ] Add middleware for protected routes
+- [ ] Implement WebSocket client with token
+
+### Phase 3: Go API Integration
+- [ ] Add Supabase JWT secret to config
+- [ ] Implement JWT validation middleware
+- [ ] Update all handlers to use `GetUserID(c)`
+- [ ] Remove self-managed auth endpoints
+- [ ] Update WebSocket handler for token auth
+- [ ] Add service role connection for admin ops
+- [ ] Test all protected endpoints
+
+### Phase 4: Python AI Service
+- [ ] Add gRPC metadata interceptor
+- [ ] Update handlers to receive user context
+- [ ] Test categorization with user context
+- [ ] Test chat with user context
+
+### Phase 5: Testing & Security
+- [ ] Test sign-up flow end-to-end
+- [ ] Test sign-in flow end-to-end
+- [ ] Test token refresh (wait for expiry)
+- [ ] Test protected routes without token
+- [ ] Test RLS policies (user A can't see user B's data)
+- [ ] Verify CORS settings
+- [ ] Test rate limiting
+- [ ] Security audit
 
 ---
 
-*Last updated: December 27, 2024*
+## 10. Environment Configuration
+
+### 10.1 Updated Docker Compose
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  web:
+    build: ./web
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8080
+    depends_on:
+      - api
+
+  api:
+    build: ./services/api
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=${SUPABASE_DATABASE_URL}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - REDIS_URL=redis://redis:6379
+      - AI_SERVICE_URL=ai:50051
+      - PLAID_CLIENT_ID=${PLAID_CLIENT_ID}
+      - PLAID_SECRET=${PLAID_SECRET}
+      - FRONTEND_URL=http://localhost:3000
+    depends_on:
+      - redis
+      - ai
+
+  ai:
+    build: ./services/ai
+    ports:
+      - "50051:50051"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
+```
+
+### 10.2 Updated .env.example
+
+```bash
+# .env.example
+
+# Supabase Configuration
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_ANON_KEY=eyJ...
+SUPABASE_SERVICE_ROLE_KEY=eyJ...
+SUPABASE_JWT_SECRET=your-jwt-secret-from-dashboard
+SUPABASE_DATABASE_URL=postgresql://postgres:[password]@db.<project-ref>.supabase.co:5432/postgres
+
+# Redis (still used for caching/rate limiting)
+REDIS_URL=redis://localhost:6379
+
+# Plaid
+PLAID_CLIENT_ID=your-plaid-client-id
+PLAID_SECRET=your-plaid-sandbox-secret
+PLAID_ENV=sandbox
+
+# OpenAI
+OPENAI_API_KEY=sk-your-openai-api-key
+
+# Services
+AI_SERVICE_URL=localhost:50051
+
+# Frontend
+NEXT_PUBLIC_API_URL=http://localhost:8080
+NEXT_PUBLIC_WS_URL=ws://localhost:8080
+```
+
+---
+
+*Last updated: December 28, 2024*
 
