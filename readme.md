@@ -12,6 +12,8 @@
 
 Connect your bank accounts, and let Hive's intelligence do the rest.
 
+![Hive Dashboard](./web/public/dashboard.png)
+
 ## ✨ Features
 
 - **🏦 Bank Sync** — Securely connect your accounts via Plaid
