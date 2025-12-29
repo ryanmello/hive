@@ -1,9 +1,7 @@
-import Image from "next/image";
-
-export default function Home() {
+export default function Page() {
   return (
     <div>
-      <p>Welcome to Hive!</p>
+      <p>hey</p>
     </div>
   );
 }
