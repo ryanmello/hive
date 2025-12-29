@@ -13,12 +13,18 @@ import {
   Heart,
   Plane,
   Dumbbell,
-  X,
   TrendingUp,
   TrendingDown,
   ArrowRight,
   type LucideIcon,
 } from "lucide-react";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from "@/components/ui/sheet";
 import type { SpendingCategory } from "@/data/mock-data";
 import { formatCurrency, formatDate } from "@/data/mock-data";
 
@@ -58,42 +64,23 @@ export function CategoryDetail({
   }, [category?.id]);
 
   return (
-    <>
-      {/* Backdrop */}
-      <div
-        className={cn(
-          "fixed inset-0 z-40 bg-black/60 backdrop-blur-sm transition-opacity duration-300",
-          isOpen ? "opacity-100" : "pointer-events-none opacity-0"
-        )}
-        onClick={onClose}
-      />
-
-      {/* Slide-out panel */}
-      <div
-        className={cn(
-          "fixed bottom-0 right-0 top-0 z-50 w-full max-w-md overflow-hidden",
-          "border-l border-white/10 shadow-2xl",
-          "transition-transform duration-500 ease-out",
-          isOpen ? "translate-x-0" : "translate-x-full"
-        )}
+    <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()} modal={false}>
+      <SheetContent
+        side="right"
+        className="w-full max-w-md overflow-hidden border-l border-white/10 p-0 sm:max-w-md"
+        showOverlay={false}
+        onInteractOutside={(e) => e.preventDefault()}
+        onPointerDownOutside={(e) => e.preventDefault()}
       >
         {category && (
-          <>
+          <div className="flex h-full flex-col">
             {/* Header with gradient */}
-            <div
+            <SheetHeader
               className="relative overflow-hidden p-6 pb-8"
               style={{
                 background: `linear-gradient(135deg, ${category.gradient.from}20 0%, ${category.gradient.to}10 100%)`,
               }}
             >
-              {/* Close button */}
-              <button
-                onClick={onClose}
-                className="absolute right-4 top-4 rounded-full p-2 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
-              >
-                <X className="h-5 w-5" />
-              </button>
-
               {/* Decorative glow */}
               <div
                 className="absolute -right-20 -top-20 h-40 w-40 opacity-50 blur-3xl"
@@ -111,12 +98,12 @@ export function CategoryDetail({
                   <Icon className="h-7 w-7 text-white" />
                 </div>
                 <div>
-                  <h2 className="text-2xl font-bold text-white">
+                  <SheetTitle className="text-2xl font-bold text-white">
                     {category.name}
-                  </h2>
-                  <p className="text-white/60">
+                  </SheetTitle>
+                  <SheetDescription className="text-white/60">
                     {category.transactions.length} transactions
-                  </p>
+                  </SheetDescription>
                 </div>
               </div>
 
@@ -154,7 +141,7 @@ export function CategoryDetail({
                   </>
                 )}
               </div>
-            </div>
+            </SheetHeader>
 
             {/* Progress bar showing category as part of total */}
             <div className="px-6 py-4">
@@ -177,7 +164,7 @@ export function CategoryDetail({
             </div>
 
             {/* Transactions list */}
-            <div className="flex-1 overflow-y-auto px-6 pb-6">
+            <div className="flex-1 overflow-y-auto px-6 pb-6 scrollbar-thin">
               <h3 className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-white/40">
                 Recent Transactions
                 <ArrowRight className="h-3 w-3" />
@@ -218,12 +205,11 @@ export function CategoryDetail({
                 ))}
               </div>
             </div>
-          </>
+          </div>
         )}
-      </div>
-    </>
+      </SheetContent>
+    </Sheet>
   );
 }
 
 export default CategoryDetail;
-

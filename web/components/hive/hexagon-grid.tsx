@@ -163,15 +163,33 @@ export function HexagonGrid({
   const containerRef = React.useRef<HTMLDivElement>(null);
   const [positions, setPositions] = React.useState<PlacedHexagon[]>([]);
   const [isAnimated, setIsAnimated] = React.useState(false);
+  const [containerWidth, setContainerWidth] = React.useState(900);
 
   // Base hexagon size
   const baseSize = 180;
 
+  // Track container width changes with ResizeObserver
+  React.useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const updateWidth = () => {
+      setContainerWidth(container.offsetWidth);
+    };
+
+    // Set initial width
+    updateWidth();
+
+    const resizeObserver = new ResizeObserver(updateWidth);
+    resizeObserver.observe(container);
+
+    return () => resizeObserver.disconnect();
+  }, []);
+
   // Calculate hexagon positions using packing algorithm
   React.useEffect(() => {
-    if (!categories.length) return;
+    if (!categories.length || containerWidth === 0) return;
 
-    const containerWidth = containerRef.current?.offsetWidth || 900;
     const centerX = containerWidth / 2;
     const centerY = 380;
 
@@ -213,9 +231,11 @@ export function HexagonGrid({
 
     setPositions(placed);
 
-    // Trigger entrance animation
-    setTimeout(() => setIsAnimated(true), 100);
-  }, [categories]);
+    // Trigger entrance animation (only on first render)
+    if (!isAnimated) {
+      setTimeout(() => setIsAnimated(true), 100);
+    }
+  }, [categories, containerWidth]);
 
   // Calculate container height based on positions
   const containerHeight = React.useMemo(() => {
@@ -273,11 +293,11 @@ export function HexagonGrid({
             <Hexagon
               category={pos.category}
               size={pos.size}
-              onClick={() =>
-                onSelectCategory(
-                  selectedCategory?.id === pos.category.id ? null : pos.category
-                )
-              }
+              onClick={() => {
+                if (selectedCategory?.id !== pos.category.id) {
+                  onSelectCategory(pos.category);
+                }
+              }}
               isSelected={selectedCategory?.id === pos.category.id}
               animationDelay={sizeOrder * 100}
             />

@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Hexagon, LogIn } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Hexagon, LogIn, AlertCircle } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -14,15 +15,44 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { useAuth } from "@/hooks/useAuth";
 
 export default function SignIn() {
-  const [isLoading, setIsLoading] = React.useState(false);
+  const router = useRouter();
+  const { signIn } = useAuth();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     setIsLoading(true);
-    // Simulate API call
-    setTimeout(() => setIsLoading(false), 1500);
+
+    try {
+      const { error: signInError } = await signIn(email, password);
+
+      if (signInError) {
+        // Map common Supabase error messages to user-friendly messages
+        if (signInError.message.includes("Invalid login credentials")) {
+          setError("Invalid email or password");
+        } else if (signInError.message.includes("Email not confirmed")) {
+          setError("Please verify your email before signing in");
+        } else {
+          setError(signInError.message);
+        }
+        return;
+      }
+
+      // Success - redirect to dashboard
+      router.push("/dashboard");
+    } catch (err) {
+      setError("An unexpected error occurred. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -140,6 +170,14 @@ export default function SignIn() {
 
           <form onSubmit={handleSubmit}>
             <CardContent className="space-y-4">
+              {/* Error message */}
+              {error && (
+                <div className="flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label htmlFor="email">Email</Label>
                 <Input
@@ -149,6 +187,8 @@ export default function SignIn() {
                   autoComplete="email"
                   required
                   disabled={isLoading}
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                 />
               </div>
 
@@ -169,6 +209,8 @@ export default function SignIn() {
                   autoComplete="current-password"
                   required
                   disabled={isLoading}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                 />
               </div>
             </CardContent>

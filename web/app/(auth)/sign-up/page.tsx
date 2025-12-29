@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Hexagon, UserPlus } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Hexagon, UserPlus, AlertCircle, CheckCircle } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -14,16 +15,174 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { useAuth } from "@/hooks/useAuth";
 
 export default function SignUp() {
-  const [isLoading, setIsLoading] = React.useState(false);
+  const router = useRouter();
+  const { signUp } = useAuth();
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsLoading(true);
-    // Simulate API call
-    setTimeout(() => setIsLoading(false), 1500);
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [confirmPassword, setConfirmPassword] = React.useState("");
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [success, setSuccess] = React.useState(false);
+
+  const validatePassword = (password: string): string | null => {
+    if (password.length < 8) {
+      return "Password must be at least 8 characters";
+    }
+    if (!/[A-Z]/.test(password)) {
+      return "Password must contain at least one uppercase letter";
+    }
+    if (!/[a-z]/.test(password)) {
+      return "Password must contain at least one lowercase letter";
+    }
+    if (!/[0-9]/.test(password)) {
+      return "Password must contain at least one number";
+    }
+    return null;
   };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(false);
+
+    // Validate passwords match
+    if (password !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+
+    // Validate password requirements
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const { data, error: signUpError } = await signUp(email, password);
+
+      if (signUpError) {
+        setError(signUpError.message);
+        return;
+      }
+
+      // Check if email confirmation is required
+      if (data?.user && !data?.session) {
+        // Email confirmation required
+        setSuccess(true);
+      } else if (data?.session) {
+        // No email confirmation required, user is logged in
+        router.push("/dashboard");
+      }
+    } catch (err) {
+      setError("An unexpected error occurred. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Success state - show confirmation message
+  if (success) {
+    return (
+      <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-12">
+        {/* Background elements remain the same */}
+        <div className="pointer-events-none fixed inset-0 z-0 opacity-[0.03]">
+          <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <pattern
+                id="honeycomb"
+                width="56"
+                height="100"
+                patternUnits="userSpaceOnUse"
+                patternTransform="scale(2)"
+              >
+                <path
+                  d="M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1"
+                />
+                <path
+                  d="M28 0L28 34L0 50L0 84L28 100L56 84L56 50L28 34"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1"
+                />
+              </pattern>
+            </defs>
+            <rect
+              width="100%"
+              height="100%"
+              fill="url(#honeycomb)"
+              className="text-amber-500"
+            />
+          </svg>
+        </div>
+
+        <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+          <div
+            className="absolute -right-40 -top-40 h-96 w-96 rounded-full opacity-20 blur-3xl"
+            style={{
+              background:
+                "radial-gradient(circle, rgba(251, 191, 36, 0.4) 0%, transparent 70%)",
+            }}
+          />
+          <div
+            className="absolute -bottom-40 -left-40 h-96 w-96 rounded-full opacity-15 blur-3xl"
+            style={{
+              background:
+                "radial-gradient(circle, rgba(34, 197, 94, 0.3) 0%, transparent 70%)",
+            }}
+          />
+        </div>
+
+        <div className="relative z-10 w-full max-w-md">
+          <div className="mb-8 flex flex-col items-center">
+            <div className="relative mb-4">
+              <div
+                className="absolute inset-0 blur-xl opacity-60"
+                style={{
+                  background:
+                    "radial-gradient(circle, rgba(251, 191, 36, 0.6) 0%, transparent 70%)",
+                }}
+              />
+              <Hexagon className="relative h-16 w-16 text-amber-500" strokeWidth={1.5} />
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight">Hive</h1>
+          </div>
+
+          <Card className="border-amber-500/10 bg-card/80 backdrop-blur-sm">
+            <CardHeader className="space-y-1 pb-4">
+              <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-green-500/10">
+                <CheckCircle className="h-6 w-6 text-green-500" />
+              </div>
+              <CardTitle className="text-center text-lg">Check your email</CardTitle>
+              <CardDescription className="text-center">
+                We&apos;ve sent a confirmation link to <strong>{email}</strong>. 
+                Please check your inbox and click the link to verify your account.
+              </CardDescription>
+            </CardHeader>
+            <CardFooter className="flex-col gap-4 pt-2">
+              <Link href="/sign-in" className="w-full">
+                <Button
+                  variant="outline"
+                  className="w-full border-amber-500/20 hover:bg-amber-500/10"
+                >
+                  Back to Sign In
+                </Button>
+              </Link>
+            </CardFooter>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-12">
@@ -140,6 +299,14 @@ export default function SignUp() {
 
           <form onSubmit={handleSubmit}>
             <CardContent className="space-y-4">
+              {/* Error message */}
+              {error && (
+                <div className="flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label htmlFor="email">Email</Label>
                 <Input
@@ -149,6 +316,8 @@ export default function SignUp() {
                   autoComplete="email"
                   required
                   disabled={isLoading}
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                 />
               </div>
 
@@ -161,6 +330,8 @@ export default function SignUp() {
                   autoComplete="new-password"
                   required
                   disabled={isLoading}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                 />
                 <p className="text-xs text-muted-foreground">
                   Must be at least 8 characters with uppercase, lowercase, and a number
@@ -176,6 +347,8 @@ export default function SignUp() {
                   autoComplete="new-password"
                   required
                   disabled={isLoading}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
                 />
               </div>
             </CardContent>

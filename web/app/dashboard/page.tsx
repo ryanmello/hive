@@ -50,8 +50,8 @@ export default function Dashboard() {
         </svg>
       </div>
 
-      {/* Ambient gradient orbs */}
-      <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+      {/* Ambient gradient orbs - contained within main content area */}
+      <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
         {/* Top left glow */}
         <div
           className="absolute -left-40 -top-40 h-96 w-96 rounded-full opacity-20 blur-3xl"
@@ -62,10 +62,7 @@ export default function Dashboard() {
         />
         {/* Bottom right glow */}
         <div
-          className={cn(
-            "absolute -bottom-40 h-96 w-96 rounded-full opacity-15 blur-3xl transition-all duration-300",
-            chatOpen ? "-right-40" : "-right-40"
-          )}
+          className="absolute -bottom-40 -right-40 h-96 w-96 rounded-full opacity-15 blur-3xl"
           style={{
             background:
               "radial-gradient(circle, rgba(139, 92, 246, 0.3) 0%, transparent 70%)",
@@ -73,11 +70,7 @@ export default function Dashboard() {
         />
         {/* Center subtle glow */}
         <div
-          className={cn(
-            "absolute top-1/2 h-[600px] w-[600px] -translate-y-1/2 rounded-full opacity-10 blur-3xl transition-all duration-300",
-            chatOpen ? "left-[calc(50%-190px)]" : "left-1/2",
-            chatOpen ? "-translate-x-1/2" : "-translate-x-1/2"
-          )}
+          className="absolute left-1/2 top-1/2 h-[600px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full opacity-10 blur-3xl"
           style={{
             background:
               "radial-gradient(circle, rgba(251, 191, 36, 0.5) 0%, transparent 60%)",
@@ -85,24 +78,50 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Main content - adjusts when chat sidebar is open */}
-      <div
-        className={cn(
-          "relative z-10 transition-all duration-300 ease-out",
-          chatOpen ? "pr-[380px]" : "pr-0"
-        )}
-      >
-        <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-          {/* Spending summary header */}
-          <SpendingSummary data={mockMonthlySpending} />
+      {/* Flex layout: main content + sidebar spacer */}
+      <div className="relative z-10 flex min-h-screen">
+        {/* Main content area - flex-1 ensures it takes remaining space */}
+        <main className="relative flex-1">
+          {/* Decorative floating hexagons (contained within main area) */}
+          <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+            {[...Array(6)].map((_, i) => (
+              <div
+                key={i}
+                className="absolute opacity-5"
+                style={{
+                  left: `${10 + i * 15}%`,
+                  top: `${20 + (i % 3) * 25}%`,
+                  animation: `float ${8 + i * 2}s ease-in-out infinite`,
+                  animationDelay: `${i * 0.5}s`,
+                }}
+              >
+                <Hexagon className="h-16 w-16 text-amber-500/50" strokeWidth={1} />
+              </div>
+            ))}
+          </div>
 
-          {/* Hexagon grid */}
-          <HexagonGrid
-            categories={mockMonthlySpending.categories}
-            selectedCategory={selectedCategory}
-            onSelectCategory={setSelectedCategory}
-          />
-        </div>
+          {/* Centered content */}
+          <div className="relative z-10 mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+            {/* Spending summary header */}
+            <SpendingSummary data={mockMonthlySpending} />
+
+            {/* Hexagon grid */}
+            <HexagonGrid
+              categories={mockMonthlySpending.categories}
+              selectedCategory={selectedCategory}
+              onSelectCategory={setSelectedCategory}
+            />
+          </div>
+        </main>
+
+        {/* Spacer element - reserves space for the fixed sidebar */}
+        <div
+          className={cn(
+            "shrink-0 transition-all duration-300 ease-out",
+            chatOpen ? "w-[380px]" : "w-0"
+          )}
+          aria-hidden="true"
+        />
       </div>
 
       {/* Category detail panel */}
@@ -112,33 +131,7 @@ export default function Dashboard() {
         totalSpending={mockMonthlySpending.totalSpent}
       />
 
-      {/* Decorative floating hexagons (subtle) */}
-      <div
-        className={cn(
-          "pointer-events-none fixed inset-0 z-0 overflow-hidden transition-all duration-300",
-          chatOpen ? "right-[380px]" : "right-0"
-        )}
-      >
-        {[...Array(6)].map((_, i) => (
-          <div
-            key={i}
-            className="absolute opacity-5"
-            style={{
-              left: `${10 + i * 15}%`,
-              top: `${20 + (i % 3) * 25}%`,
-              animation: `float ${8 + i * 2}s ease-in-out infinite`,
-              animationDelay: `${i * 0.5}s`,
-            }}
-          >
-            <Hexagon
-              className="h-16 w-16 text-amber-500/50"
-              strokeWidth={1}
-            />
-          </div>
-        ))}
-      </div>
-
-      {/* AI Chat Sidebar */}
+      {/* AI Chat Sidebar (fixed positioned) */}
       <ChatSidebar open={chatOpen} onOpenChange={setChatOpen} />
     </div>
   );

@@ -1,8 +1,7 @@
 "use client";
 
-import * as React from "react";
+import { useEffect, useState, useRef } from "react";
 import {
-  MessageSquare,
   Send,
   Sparkles,
   Bot,
@@ -25,30 +24,46 @@ interface ChatSidebarProps {
   onOpenChange: (open: boolean) => void;
 }
 
-const initialMessages: Message[] = [
-  {
-    id: "1",
-    role: "assistant",
-    content:
-      "Hey there! I'm your Hive financial assistant. I can help you understand your spending patterns, suggest ways to save, or answer questions about your transactions. What would you like to know?",
-    timestamp: new Date(),
-  },
-];
-
 export function ChatSidebar({ open, onOpenChange }: ChatSidebarProps) {
-  const [messages, setMessages] = React.useState<Message[]>(initialMessages);
-  const [input, setInput] = React.useState("");
-  const [isTyping, setIsTyping] = React.useState(false);
-  const messagesEndRef = React.useRef<HTMLDivElement>(null);
-  const inputRef = React.useRef<HTMLTextAreaElement>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isMounted, setIsMounted] = useState(false);
+
+  // Initialize messages only on client to avoid hydration mismatch
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  const [input, setInput] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  React.useEffect(() => {
+  useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Auto-resize textarea up to 4 lines
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+
+    // Reset height to auto to get accurate scrollHeight
+    textarea.style.height = "auto";
+
+    // Calculate max height for 4 lines (line-height ~21px + padding 16px)
+    const lineHeight = 21;
+    const padding = 16;
+    const maxHeight = lineHeight * 4 + padding;
+    const minHeight = 36;
+
+    // Set height to scrollHeight, capped at maxHeight
+    const newHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
+    textarea.style.height = `${newHeight}px`;
+  }, [input]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -106,7 +121,7 @@ export function ChatSidebar({ open, onOpenChange }: ChatSidebarProps) {
         {/* Header */}
         <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-linear-to-br from-amber-400 to-orange-500 shadow-lg shadow-amber-500/20">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500 shadow-lg shadow-amber-500/20">
               <Sparkles className="h-4 w-4 text-white" />
             </div>
             <div>
@@ -129,7 +144,7 @@ export function ChatSidebar({ open, onOpenChange }: ChatSidebarProps) {
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
           <div className="flex flex-col gap-4">
             {messages.map((message) => (
               <div
@@ -140,44 +155,27 @@ export function ChatSidebar({ open, onOpenChange }: ChatSidebarProps) {
                 )}
               >
                 {/* Avatar */}
-                <div
-                  className={cn(
-                    "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
-                    message.role === "assistant"
-                      ? "bg-linear-to-br from-amber-400 to-orange-500"
-                      : "bg-linear-to-br from-violet-500 to-purple-600"
-                  )}
-                >
-                  {message.role === "assistant" ? (
+                {message.role === "assistant" && (
+                  <div
+                    className={cn(
+                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
+                      message.role === "assistant" ? "bg-muted" : "bg-amber-500"
+                    )}
+                  >
                     <Bot className="h-3.5 w-3.5 text-white" />
-                  ) : (
-                    <User className="h-3.5 w-3.5 text-white" />
-                  )}
-                </div>
+                  </div>
+                )}
 
                 {/* Message bubble */}
                 <div
                   className={cn(
                     "max-w-[85%] rounded-2xl px-3.5 py-2 text-[13px]",
                     message.role === "assistant"
-                      ? "rounded-tl-md bg-muted text-foreground"
-                      : "rounded-tr-md bg-linear-to-br from-amber-500 to-orange-500 text-white"
+                      ? " bg-muted text-foreground"
+                      : " bg-amber-500 text-white"
                   )}
                 >
                   <p className="leading-relaxed">{message.content}</p>
-                  <p
-                    className={cn(
-                      "mt-1 text-[10px]",
-                      message.role === "assistant"
-                        ? "text-muted-foreground"
-                        : "text-white/70"
-                    )}
-                  >
-                    {message.timestamp.toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </p>
                 </div>
               </div>
             ))}
@@ -203,31 +201,36 @@ export function ChatSidebar({ open, onOpenChange }: ChatSidebarProps) {
         </div>
 
         {/* Input area */}
-        <div className="border-t border-white/10 bg-background/80 p-3">
-          <form onSubmit={handleSubmit} className="flex gap-2">
-            <div className="relative flex-1">
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask about your finances..."
-                rows={1}
-                className="w-full resize-none rounded-xl border border-white/10 bg-muted/50 px-3.5 py-2.5 text-[13px] text-foreground placeholder:text-muted-foreground focus:border-amber-500/50 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
-                style={{ minHeight: "42px", maxHeight: "100px" }}
-              />
-            </div>
+        <div className="border-t border-white/5 p-3">
+          <form
+            onSubmit={handleSubmit}
+            className="flex items-end gap-2 rounded-2xl bg-white/3 p-1.5 ring-1 ring-white/8 transition-all focus-within:ring-white/15"
+          >
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask about your finances..."
+              rows={1}
+              className="flex-1 resize-none bg-transparent px-3 py-2 text-[13px] text-foreground placeholder:text-muted-foreground/60 focus:outline-none overflow-y-auto scrollbar-thin"
+              style={{ height: "36px" }}
+              data-gramm="false"
+              data-gramm_editor="false"
+              data-enable-grammarly="false"
+              spellCheck={false}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+            />
             <Button
               type="submit"
               disabled={!input.trim() || isTyping}
-              className="h-[42px] w-[42px] shrink-0 rounded-xl bg-linear-to-br from-amber-500 to-orange-500 p-0 text-white shadow-lg shadow-amber-500/20 transition-all hover:scale-105 hover:shadow-amber-500/40 disabled:opacity-50 disabled:hover:scale-100"
+              className="h-9 w-9 shrink-0 rounded-xl bg-amber-500 p-0 text-white transition-all hover:bg-amber-400 disabled:bg-muted disabled:text-muted-foreground"
             >
               <Send className="h-4 w-4" />
             </Button>
           </form>
-          <p className="mt-2 text-center text-[10px] text-muted-foreground">
-            AI responses are for informational purposes only
-          </p>
         </div>
       </div>
 
@@ -235,7 +238,7 @@ export function ChatSidebar({ open, onOpenChange }: ChatSidebarProps) {
       <Button
         onClick={() => onOpenChange(true)}
         className={cn(
-          "fixed right-4 top-4 z-50 h-10 gap-2 rounded-xl bg-linear-to-br from-amber-500 to-orange-500 px-3 text-white shadow-lg shadow-amber-500/20 transition-all duration-300 hover:scale-105 hover:shadow-amber-500/40",
+          "cursor-pointer fixed right-4 top-4 z-50 h-10 gap-2 rounded-xl bg-amber-500 px-3 text-white shadow-lg shadow-amber-500/20 transition-all duration-300 hover:scale-105 hover:shadow-amber-500/40",
           open && "pointer-events-none opacity-0"
         )}
       >
